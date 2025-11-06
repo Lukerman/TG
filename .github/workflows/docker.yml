@@ -1,0 +1,349 @@
+name: Build and Deploy Docker Image
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*.*.*' ]
+  workflow_dispatch:
+  schedule:
+    # Update Docker image weekly
+    - cron: '0 3 * * 0'
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # Build Docker image
+  build:
+    runs-on: ubuntu-latest
+    name: Build Docker Image
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=semver,pattern={{major}}
+          type=raw,value=latest,enable={{is_default_branch}}
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        platforms: linux/amd64,linux/arm64
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Generate SBOM
+      uses: anchore/sbom-action@v0
+      with:
+        image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+        format: spdx-json
+        output-file: sbom.spdx.json
+
+    - name: Upload SBOM
+      uses: actions/upload-artifact@v3
+      with:
+        name: sbom
+        path: sbom.spdx.json
+
+  # Security scanning
+  security-scan:
+    runs-on: ubuntu-latest
+    name: Docker Security Scan
+    needs: build
+    if: github.event_name != 'pull_request'
+
+    steps:
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+
+    - name: Upload Trivy scan results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+  # Deploy to Docker Hub (optional)
+  deploy-docker-hub:
+    runs-on: ubuntu-latest
+    name: Deploy to Docker Hub
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: production
+
+    steps:
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Login to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ secrets.DOCKERHUB_USERNAME }}/temp-mail-bot
+        tags: |
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=raw,value=latest,enable={{is_default_branch}}
+
+    - name: Build and push to Docker Hub
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        platforms: linux/amd64,linux/arm64
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+
+  # Deploy to container service
+  deploy-container:
+    runs-on: ubuntu-latest
+    name: Deploy Container Service
+    needs: [build, security-scan]
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    environment: production
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set image tag
+      run: |
+        if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+          IMAGE_TAG="latest"
+        else
+          IMAGE_TAG="${{ github.ref_name }}"
+        fi
+        echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
+
+    - name: Deploy to container service
+      uses: appleboy/ssh-action@v0.1.5
+      with:
+        host: ${{ secrets.CONTAINER_HOST }}
+        username: ${{ secrets.CONTAINER_USERNAME }}
+        key: ${{ secrets.CONTAINER_SSH_KEY }}
+        port: ${{ secrets.CONTAINER_PORT }}
+        timeout: 300s
+        command_timeout: 300s
+        script: |
+          # Set environment variables
+          IMAGE_TAG="${{ env.IMAGE_TAG }}"
+          IMAGE_NAME="ghcr.io/${{ github.repository }}"
+          CONTAINER_NAME="temp-mail-bot"
+          DATA_DIR="${{ secrets.DATA_DIR }}"
+
+          echo "Deploying container: $IMAGE_NAME:$IMAGE_TAG"
+
+          # Create data directory
+          sudo mkdir -p $DATA_DIR
+          sudo chown -R $USER:$USER $DATA_DIR
+
+          # Stop and remove existing container
+          sudo docker stop $CONTAINER_NAME 2>/dev/null || true
+          sudo docker rm $CONTAINER_NAME 2>/dev/null || true
+
+          # Pull latest image
+          sudo docker pull $IMAGE_NAME:$IMAGE_TAG
+
+          # Create environment file
+          cat > $DATA_DIR/.env << EOF
+          TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}
+          MONGO_CONNECTION_STRING=${{ secrets.MONGO_CONNECTION_STRING }}
+          IMAP_HOST=${{ secrets.IMAP_HOST }}
+          IMAP_PORT=${{ secrets.IMAP_PORT }}
+          IMAP_USERNAME=${{ secrets.IMAP_USERNAME }}
+          IMAP_PASSWORD=${{ secrets.IMAP_PASSWORD }}
+          EMAIL_DOMAIN=${{ secrets.EMAIL_DOMAIN }}
+          EMAIL_EXPIRY_HOURS=${{ secrets.EMAIL_EXPIRY_HOURS }}
+          DEBUG_MODE=${{ secrets.DEBUG_MODE }}
+          LOG_LEVEL=${{ secrets.LOG_LEVEL }}
+          EOF
+
+          # Run new container
+          sudo docker run -d \
+            --name $CONTAINER_NAME \
+            --restart unless-stopped \
+            -p ${{ secrets.BOT_PORT }}:8080 \
+            --env-file $DATA_DIR/.env \
+            -v $DATA_DIR:/app/data \
+            --memory="512m" \
+            --cpus="1.0" \
+            $IMAGE_NAME:$IMAGE_TAG
+
+          # Wait for container to start
+          sleep 10
+
+          # Check container status
+          if sudo docker ps | grep -q $CONTAINER_NAME; then
+            echo "✅ Container started successfully"
+
+            # Show container logs
+            echo "Container logs:"
+            sudo docker logs $CONTAINER_NAME --tail 20
+          else
+            echo "❌ Container failed to start"
+            echo "Container logs:"
+            sudo docker logs $CONTAINER_NAME
+            exit 1
+          fi
+
+          # Cleanup old images
+          sudo docker image prune -f
+
+  # Container health check
+  health-check:
+    runs-on: ubuntu-latest
+    name: Container Health Check
+    needs: deploy-container
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+    - name: Check container health
+      uses: appleboy/ssh-action@v0.1.5
+      with:
+        host: ${{ secrets.CONTAINER_HOST }}
+        username: ${{ secrets.CONTAINER_USERNAME }}
+        key: ${{ secrets.CONTAINER_SSH_KEY }}
+        port: ${{ secrets.CONTAINER_PORT }}
+        script: |
+          CONTAINER_NAME="temp-mail-bot"
+          DATA_DIR="${{ secrets.DATA_DIR }}"
+
+          # Check if container is running
+          if sudo docker ps | grep -q $CONTAINER_NAME; then
+            echo "✅ Container is running"
+
+            # Check container health
+            HEALTH=$(sudo docker inspect --format='{{.State.Health.Status}}' $CONTAINER_NAME 2>/dev/null || echo "no-health-check")
+            echo "Container health status: $HEALTH"
+
+            # Check resource usage
+            echo "Container resource usage:"
+            sudo docker stats $CONTAINER_NAME --no-stream --format "table {{.Container}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}"
+
+            # Check recent logs for errors
+            ERROR_COUNT=$(sudo docker logs $CONTAINER_NAME --since="1h" 2>&1 | grep -i error | wc -l)
+            if [ "$ERROR_COUNT" -gt "5" ]; then
+              echo "⚠️ High error count detected: $ERROR_COUNT errors in last hour"
+              sudo docker logs $CONTAINER_NAME --since="1h" 2>&1 | grep -i error | tail -10
+            else
+              echo "✅ Low error count: $ERROR_COUNT errors in last hour"
+            fi
+
+            # Test bot responsiveness (if bot port is exposed)
+            if command -v curl &> /dev/null && [ -n "${{ secrets.HEALTH_CHECK_URL }}" ]; then
+              HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${{ secrets.HEALTH_CHECK_URL }}" || echo "000")
+              if [ "$HTTP_STATUS" = "200" ]; then
+                echo "✅ Health check passed (HTTP $HTTP_STATUS)"
+              else
+                echo "⚠️ Health check failed (HTTP $HTTP_STATUS)"
+              fi
+            fi
+
+          else
+            echo "❌ Container is not running"
+
+            # Show recent logs
+            echo "Recent container logs:"
+            sudo docker logs $CONTAINER_NAME --tail 50
+
+            # Try to restart container
+            echo "Attempting to restart container..."
+            sudo docker start $CONTAINER_NAME || true
+            sleep 10
+
+            if sudo docker ps | grep -q $CONTAINER_NAME; then
+              echo "✅ Container restarted successfully"
+            else
+              echo "❌ Container restart failed"
+              exit 1
+            fi
+          fi
+
+  # Multi-architecture build test
+  build-test:
+    runs-on: ubuntu-latest
+    name: Multi-Architecture Build Test
+    if: github.event_name == 'pull_request'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+      with:
+        platforms: all
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      with:
+        platforms: linux/amd64,linux/arm64
+
+    - name: Build test images
+      run: |
+        docker buildx build \
+          --platform linux/amd64,linux/arm64 \
+          --tag test-temp-mail-bot:latest \
+          --load \
+          .
+
+    - name: Test image functionality
+      run: |
+        # Test basic image functionality
+        docker run --rm test-temp-mail-bot:latest python -c "
+import sys
+sys.path.insert(0, '/app')
+
+try:
+    from config import EMAIL_DOMAIN
+    print(f'✅ Configuration loaded: EMAIL_DOMAIN={EMAIL_DOMAIN}')
+except Exception as e:
+    print(f'❌ Configuration failed: {e}')
+    sys.exit(1)
+
+try:
+    from email_services.email_generator import EmailGenerator
+    print('✅ EmailGenerator imported successfully')
+except Exception as e:
+    print(f'❌ EmailGenerator failed: {e}')
+    sys.exit(1)
+
+print('✅ All tests passed!')
+"

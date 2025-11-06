@@ -405,7 +405,7 @@ class MessageHandlers:
                 return
 
             # Import email generator
-            from email.email_generator import EmailGenerator
+            from email_services.email_generator import EmailGenerator
             email_generator = EmailGenerator(self.mongo_client)
 
             # Validate the prefix

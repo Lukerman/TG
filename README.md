@@ -109,10 +109,18 @@ TG/
 ├── config.py                 # Configuration settings
 ├── requirements.txt          # Python dependencies
 ├── README.md                 # This file
+├── INSTALLATION.md           # Detailed installation guide
 ├── .env.example             # Environment variables template
+├── Dockerfile                # Docker container definition
+├── docker-compose.yml        # Docker Compose configuration
+├── .github/workflows/        # GitHub Actions CI/CD workflows
+│   ├── deploy.yml            # Main deployment workflow
+│   ├── test.yml              # Testing and CI workflow
+│   ├── docker.yml            # Docker build and deployment
+│   └── README.md              # Workflow documentation
 ├── database/
 │   └── mongo_client.py       # MongoDB operations
-├── email/
+├── email_services/
 │   ├── imap_client.py        # IMAP email fetching
 │   ├── email_parser.py       # Email content parsing
 │   └── email_generator.py    # Temporary email generation

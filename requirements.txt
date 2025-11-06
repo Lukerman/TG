@@ -1,4 +1,4 @@
-# Telegram Bot
+# Telegram Bot Core
 python-telegram-bot>=20.3
 
 # MongoDB (Async)
@@ -9,27 +9,11 @@ pymongo[srv]>=4.6.0
 # Environment Variables
 python-dotenv>=1.0.0
 
-# Email Processing
-aiosmtplib>=3.0.0
-
-# Async Support
-asyncio-mqtt>=0.13.0
-
-# Additional Utilities
-aiofiles>=23.0.0
-python-dateutil>=2.8.2
+# File Type Detection (for attachments)
+python-magic>=0.4.27
 
 # Development and Testing (optional)
 pytest>=7.4.0
 pytest-asyncio>=0.21.0
 black>=23.0.0
 flake8>=6.0.0
-
-# Logging and Monitoring
-structlog>=23.0.0
-
-# Security and Validation
-cryptography>=41.0.0
-
-# File Handling
-magic>=0.4.27

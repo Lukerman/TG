@@ -1,0 +1,149 @@
+version: '3.8'
+
+services:
+  # Main Telegram Temp Mail Bot service
+  temp-mail-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: temp-mail-bot
+    restart: unless-stopped
+    environment:
+      # Development environment variables (override with .env file)
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - MONGO_CONNECTION_STRING=${MONGO_CONNECTION_STRING}
+      - IMAP_HOST=${IMAP_HOST:-mail.seveton.site}
+      - IMAP_PORT=${IMAP_PORT:-993}
+      - IMAP_USERNAME=${IMAP_USERNAME}
+      - IMAP_PASSWORD=${IMAP_PASSWORD}
+      - EMAIL_DOMAIN=${EMAIL_DOMAIN:-seveton.site}
+      - EMAIL_EXPIRY_HOURS=${EMAIL_EXPIRY_HOURS:-1}
+      - DEBUG_MODE=${DEBUG_MODE:-false}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - MAX_INBOX_MESSAGES=${MAX_INBOX_MESSAGES:-5}
+      - BACKGROUND_FETCH_INTERVAL=${BACKGROUND_FETCH_INTERVAL:-60}
+      - CLEANUP_INTERVAL=${CLEANUP_INTERVAL:-300}
+    volumes:
+      - ./data:/app/data
+      - ./.env:/app/.env:ro
+    ports:
+      - "8080:8080"  # If bot exposes web interface
+    networks:
+      - temp-mail-network
+    depends_on:
+      - mongodb
+    healthcheck:
+      test: ["CMD", "python", "-c", "from config import EMAIL_DOMAIN; print('OK')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # MongoDB database (for local development)
+  mongodb:
+    image: mongo:6.0
+    container_name: temp-mail-mongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:-admin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-password123}
+      MONGO_INITDB_DATABASE: temp_mail_bot
+    volumes:
+      - mongodb_data:/data/db
+      - ./scripts/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    ports:
+      - "27017:27017"
+    networks:
+      - temp-mail-network
+    healthcheck:
+      test: ["CMD", "mongo", "--eval", "db.adminCommand('ping')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # Redis (for caching, optional)
+  redis:
+    image: redis:7-alpine
+    container_name: temp-mail-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-redis123}
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - temp-mail-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Nginx (optional, for reverse proxy)
+  nginx:
+    image: nginx:alpine
+    container_name: temp-mail-nginx
+    restart: unless-stopped
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    networks:
+      - temp-mail-network
+    depends_on:
+      - temp-mail-bot
+
+  # Monitoring (optional)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: temp-mail-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - temp-mail-network
+    profiles:
+      - monitoring
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: temp-mail-grafana
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin123}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana:/etc/grafana/provisioning
+    ports:
+      - "3000:3000"
+    networks:
+      - temp-mail-network
+    depends_on:
+      - prometheus
+    profiles:
+      - monitoring
+
+# Named volumes
+volumes:
+  mongodb_data:
+    driver: local
+  redis_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+# Networks
+networks:
+  temp-mail-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

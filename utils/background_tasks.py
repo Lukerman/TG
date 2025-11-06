@@ -16,8 +16,8 @@ from config import (
     MAX_INBOX_MESSAGES,
     MONITORING_ENABLED
 )
-from email.imap_client import IMAPClient
-from email.email_parser import EmailParser
+from email_services.imap_client import IMAPClient
+from email_services.email_parser import EmailParser
 
 logger = logging.getLogger(__name__)
 

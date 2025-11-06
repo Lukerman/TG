@@ -1,0 +1,368 @@
+name: Deploy Telegram Temp Mail Bot
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+  schedule:
+    # Run daily at 2 AM UTC to check health and restart if needed
+    - cron: '0 2 * * *'
+
+env:
+  PYTHON_VERSION: '3.9'
+  NODE_VERSION: '18'
+
+jobs:
+  # Health check and lint job
+  health-check:
+    runs-on: ubuntu-latest
+    name: Health Check & Lint
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libmagic1
+
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install flake8 black
+
+    - name: Lint code with flake8
+      run: |
+        # Stop the build if there are Python syntax errors or undefined names
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        # Exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
+        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+
+    - name: Check code formatting with black
+      run: |
+        black --check --diff .
+
+    - name: Test imports
+      run: |
+        python -c "
+import sys
+import os
+sys.path.insert(0, os.getcwd())
+
+print('Testing imports...')
+try:
+    from telegram import Update
+    print('✅ Telegram import successful')
+except ImportError as e:
+    print(f'❌ Telegram import failed: {e}')
+    sys.exit(1)
+
+try:
+    from motor.motor_asyncio import AsyncIOMotorClient
+    print('✅ Motor import successful')
+except ImportError as e:
+    print(f'❌ Motor import failed: {e}')
+    sys.exit(1)
+
+try:
+    import magic
+    print('✅ Magic import successful')
+except ImportError as e:
+    print(f'❌ Magic import failed: {e}')
+    sys.exit(1)
+
+print('All imports successful!')
+"
+
+  # Deploy to production server
+  deploy:
+    needs: health-check
+    runs-on: ubuntu-latest
+    name: Deploy to Server
+
+    environment: production
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libmagic1
+
+    - name: Deploy to server
+      uses: appleboy/ssh-action@v0.1.5
+      with:
+        host: ${{ secrets.SERVER_HOST }}
+        username: ${{ secrets.SERVER_USERNAME }}
+        key: ${{ secrets.SERVER_SSH_KEY }}
+        port: ${{ secrets.SERVER_PORT }}
+        timeout: 300s
+        command_timeout: 300s
+        script: |
+          # Create deployment directory if it doesn't exist
+          mkdir -p ${{ secrets.APP_PATH }}
+          cd ${{ secrets.APP_PATH }}
+
+          # Backup current version
+          if [ -d "TG" ]; then
+            echo "Creating backup..."
+            mv TG TG_backup_$(date +%Y%m%d_%H%M%S)
+          fi
+
+          # Clone latest version
+          echo "Cloning latest version..."
+          git clone https://github.com/Lukerman/TG.git
+          cd TG
+
+          # Create virtual environment if it doesn't exist
+          if [ ! -d "venv" ]; then
+            echo "Creating virtual environment..."
+            python3 -m venv venv
+          fi
+
+          # Activate virtual environment and install dependencies
+          echo "Installing dependencies..."
+          source venv/bin/activate
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+          # Create environment file
+          echo "Setting up environment..."
+          cat > .env << EOF
+          TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}
+          MONGO_CONNECTION_STRING=${{ secrets.MONGO_CONNECTION_STRING }}
+          IMAP_HOST=${{ secrets.IMAP_HOST }}
+          IMAP_PORT=${{ secrets.IMAP_PORT }}
+          IMAP_USERNAME=${{ secrets.IMAP_USERNAME }}
+          IMAP_PASSWORD=${{ secrets.IMAP_PASSWORD }}
+          EMAIL_DOMAIN=${{ secrets.EMAIL_DOMAIN }}
+          EMAIL_EXPIRY_HOURS=${{ secrets.EMAIL_EXPIRY_HOURS }}
+          DEBUG_MODE=${{ secrets.DEBUG_MODE }}
+          LOG_LEVEL=${{ secrets.LOG_LEVEL }}
+          EOF
+
+          # Test configuration
+          echo "Testing configuration..."
+          python -c "
+import os
+from dotenv import load_dotenv
+load_dotenv()
+
+required_vars = ['TELEGRAM_BOT_TOKEN', 'MONGO_CONNECTION_STRING']
+missing = [var for var in required_vars if not os.getenv(var)]
+if missing:
+    print(f'❌ Missing required environment variables: {missing}')
+    exit(1)
+print('✅ Configuration test passed')
+"
+
+          # Stop existing bot if running
+          echo "Stopping existing bot..."
+          pkill -f "python bot.py" || true
+
+          # Wait for process to stop
+          sleep 5
+
+          # Test bot startup
+          echo "Testing bot startup..."
+          timeout 30 python bot.py &
+          BOT_PID=$!
+
+          # Wait a bit for startup
+          sleep 10
+
+          # Check if bot is still running
+          if kill -0 $BOT_PID 2>/dev/null; then
+            echo "✅ Bot started successfully"
+            kill $BOT_PID
+          else
+            echo "❌ Bot failed to start"
+            exit 1
+          fi
+
+          echo "Deployment completed successfully!"
+
+  # Setup systemd service (first time only)
+  setup-service:
+    needs: deploy
+    runs-on: ubuntu-latest
+    name: Setup System Service
+    if: contains(github.event.head_commit.message, '[setup-service]')
+
+    steps:
+    - name: Setup systemd service
+      uses: appleboy/ssh-action@v0.1.5
+      with:
+        host: ${{ secrets.SERVER_HOST }}
+        username: ${{ secrets.SERVER_USERNAME }}
+        key: ${{ secrets.SERVER_SSH_KEY }}
+        port: ${{ secrets.SERVER_PORT }}
+        script: |
+          # Create systemd service file
+          sudo tee /etc/systemd/system/temp-mail-bot.service > /dev/null << EOF
+          [Unit]
+          Description=Telegram Temp Mail Bot
+          After=network.target
+
+          [Service]
+          Type=simple
+          User=${{ secrets.SERVER_USERNAME }}
+          WorkingDirectory=${{ secrets.APP_PATH }}/TG
+          ExecStart=${{ secrets.APP_PATH }}/TG/venv/bin/python bot.py
+          Restart=always
+          RestartSec=10
+          Environment=PATH=${{ secrets.APP_PATH }}/TG/venv/bin
+          EnvironmentFile=${{ secrets.APP_PATH }}/TG/.env
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          # Reload systemd and enable service
+          sudo systemctl daemon-reload
+          sudo systemctl enable temp-mail-bot
+
+          # Start the service
+          sudo systemctl start temp-mail-bot
+
+          # Check service status
+          sudo systemctl status temp-mail-bot
+
+          echo "✅ System service setup completed!"
+
+  # Health monitoring
+  health-monitor:
+    needs: deploy
+    runs-on: ubuntu-latest
+    name: Health Monitor
+    if: github.event_name == 'schedule'
+
+    steps:
+    - name: Check bot health
+      uses: appleboy/ssh-action@v0.1.5
+      with:
+        host: ${{ secrets.SERVER_HOST }}
+        username: ${{ secrets.SERVER_USERNAME }}
+        key: ${{ secrets.SERVER_SSH_KEY }}
+        port: ${{ secrets.SERVER_PORT }}
+        script: |
+          # Check if service is running
+          if systemctl is-active --quiet temp-mail-bot; then
+            echo "✅ Bot service is running"
+
+            # Check if bot process is responsive
+            cd ${{ secrets.APP_PATH }}/TG
+            source venv/bin/activate
+
+            # Test if bot can connect to MongoDB
+            python -c "
+import os
+from dotenv import load_dotenv
+load_dotenv()
+
+try:
+    from motor.motor_asyncio import AsyncIOMotorClient
+    import asyncio
+
+    async def test_mongodb():
+        client = AsyncIOMotorClient(os.getenv('MONGO_CONNECTION_STRING'))
+        await client.admin.command('ping')
+        print('✅ MongoDB connection successful')
+        await client.close()
+
+    asyncio.run(test_mongodb())
+except Exception as e:
+    print(f'❌ MongoDB connection failed: {e}')
+    exit(1)
+"
+
+            # Check service logs for errors
+            RECENT_ERRORS=$(sudo journalctl -u temp-mail-bot --since "1 hour ago" --priority=err --no-pager | wc -l)
+            if [ "$RECENT_ERRORS" -gt "0" ]; then
+              echo "⚠️ Found $RECENT_ERRORS recent errors in logs"
+              sudo journalctl -u temp-mail-bot --since "1 hour ago" --priority=err --no-pager
+            fi
+
+          else
+            echo "❌ Bot service is not running"
+
+            # Try to restart the service
+            sudo systemctl restart temp-mail-bot
+            sleep 10
+
+            if systemctl is-active --quiet temp-mail-bot; then
+              echo "✅ Bot service restarted successfully"
+            else
+              echo "❌ Failed to restart bot service"
+              sudo journalctl -u temp-mail-bot --since "10 minutes ago" --no-pager
+              exit 1
+            fi
+          fi
+
+  # Rollback on failure
+  rollback:
+    needs: deploy
+    runs-on: ubuntu-latest
+    name: Rollback on Failure
+    if: failure() && needs.deploy.result == 'failure'
+
+    steps:
+    - name: Rollback to previous version
+      uses: appleboy/ssh-action@v0.1.5
+      with:
+        host: ${{ secrets.SERVER_HOST }}
+        username: ${{ secrets.SERVER_USERNAME }}
+        key: ${{ secrets.SERVER_SSH_KEY }}
+        port: ${{ secrets.SERVER_PORT }}
+        script: |
+          cd ${{ secrets.APP_PATH }}
+
+          # Find the most recent backup
+          BACKUP_DIR=$(ls -1t TG_backup_* 2>/dev/null | head -1)
+
+          if [ -n "$BACKUP_DIR" ]; then
+            echo "Rolling back to $BACKUP_DIR"
+
+            # Stop current bot
+            sudo systemctl stop temp-mail-bot || true
+            pkill -f "python bot.py" || true
+
+            # Remove failed deployment
+            rm -rf TG
+
+            # Restore backup
+            mv $BACKUP_DIR TG
+
+            # Start bot again
+            cd TG
+            source venv/bin/activate
+            python bot.py &
+
+            sleep 10
+            echo "✅ Rollback completed"
+          else
+            echo "❌ No backup found for rollback"
+            exit 1
+          fi

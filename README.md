@@ -205,23 +205,77 @@ Email addresses follow this format:
 
 ### Docker Deployment
 
-1. **Create Dockerfile**:
-   ```dockerfile
-   FROM python:3.9-slim
-
-   WORKDIR /app
-   COPY requirements.txt .
-   RUN pip install -r requirements.txt
-
-   COPY . .
-   CMD ["python", "bot.py"]
-   ```
-
-2. **Build and run**:
+1. **Using Docker Compose (Recommended)**:
    ```bash
-   docker build -t temp-mail-bot .
-   docker run -d --env-file .env temp-mail-bot
+   # Clone and configure
+   git clone https://github.com/Lukerman/TG.git
+   cd TG
+   cp .env.example .env
+   # Edit .env with your credentials
+
+   # Run with Docker Compose
+   docker-compose up -d
    ```
+
+2. **Using Docker**:
+   ```bash
+   # Build image
+   docker build -t temp-mail-bot .
+
+   # Run container
+   docker run -d \
+     --name temp-mail-bot \
+     --env-file .env \
+     --restart unless-stopped \
+     temp-mail-bot
+   ```
+
+3. **Multi-stage build**:
+   ```bash
+   # Build for production
+   docker buildx build \
+     --platform linux/amd64,linux/arm64 \
+     -t temp-mail-bot:latest \
+     --push .
+   ```
+
+### GitHub Actions CI/CD 🤖
+
+The project includes comprehensive GitHub Actions workflows for automated deployment and testing:
+
+**✅ Automated Workflows:**
+- **CI Testing**: Linting, import testing, security scanning
+- **Auto Deployment**: Zero-downtime deployment to production servers
+- **Health Monitoring**: Daily health checks and automatic recovery
+- **Container Deployment**: Docker image building and multi-architecture support
+- **Rollback**: Automatic rollback on deployment failure
+
+**📋 Required GitHub Secrets:**
+```yaml
+# Server Access
+SERVER_HOST: your-server-ip
+SERVER_USERNAME: ssh-username
+SERVER_SSH_KEY: private-ssh-key
+APP_PATH: /opt/botapps
+
+# Application Configuration
+TELEGRAM_BOT_TOKEN: your-telegram-token
+MONGO_CONNECTION_STRING: mongodb-connection-string
+IMAP_HOST: imap-server-host
+IMAP_USERNAME: imap-username
+IMAP_PASSWORD: imap-password
+```
+
+**🚀 Trigger Deployment:**
+```bash
+# Push to main branch (triggers auto-deployment)
+git commit -m "Update bot features"
+git push origin main
+
+# Manual deployment
+git commit -m "Deploy with service setup [setup-service]"
+git push origin main
+```
 
 ### VPS Deployment
 

@@ -1,0 +1,378 @@
+name: Test Telegram Temp Mail Bot
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  # Python linting and syntax checking
+  lint:
+    runs-on: ubuntu-latest
+    name: Lint & Syntax Check
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libmagic1
+
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install flake8 black pytest pytest-asyncio
+
+    - name: Lint with flake8
+      run: |
+        # Configure flake8 to ignore specific files and patterns
+        flake8 . \
+          --count \
+          --select=E9,F63,F7,F82,F84,F401,F403,F405,F841,F842,F901,W293,W503,W504 \
+          --show-source \
+          --statistics \
+          --ignore=venv,__pycache__,.git
+
+    - name: Check code formatting with black
+      run: |
+        black --check --diff --color .
+
+    - name: Check import sorting
+      run: |
+        pip install isort
+        isort --check-only --diff .
+
+  # Import testing
+  import-test:
+    runs-on: ubuntu-latest
+    name: Import Testing
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libmagic1
+
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Test all imports
+      run: |
+        python -c "
+import sys
+import os
+
+# Add current directory to path
+sys.path.insert(0, os.getcwd())
+
+print('Testing all module imports...')
+
+# Test core modules
+modules_to_test = [
+    'config',
+    'email_services.email_generator',
+    'email_services.imap_client',
+    'email_services.email_parser',
+    'database.mongo_client',
+    'handlers.command_handlers',
+    'handlers.callback_handlers',
+    'handlers.message_handlers',
+    'keyboards.inline_keyboards',
+    'keyboards.reply_keyboards',
+    'utils.validators',
+    'utils.formatters',
+    'utils.background_tasks',
+]
+
+failed_imports = []
+successful_imports = []
+
+for module in modules_to_test:
+    try:
+        __import__(module)
+        successful_imports.append(module)
+        print(f'✅ {module}')
+    except ImportError as e:
+        failed_imports.append((module, str(e)))
+        print(f'❌ {module}: {e}')
+    except Exception as e:
+        failed_imports.append((module, str(e)))
+        print(f'⚠️ {module}: {e}')
+
+print(f'\nImport Results:')
+print(f'✅ Successful: {len(successful_imports)}')
+print(f'❌ Failed: {len(failed_imports)}')
+
+if failed_imports:
+    print('\nFailed Imports:')
+    for module, error in failed_imports:
+        print(f'  - {module}: {error}')
+    sys.exit(1)
+else:
+    print('\n🎉 All imports successful!')
+"
+
+    - name: Test essential external dependencies
+      run: |
+        python -c "
+print('Testing essential external dependencies...')
+
+try:
+    import telegram
+    print('✅ python-telegram-bot')
+except ImportError as e:
+    print(f'❌ python-telegram-bot: {e}')
+    exit(1)
+
+try:
+    from motor.motor_asyncio import AsyncIOMotorClient
+    print('✅ motor (MongoDB)')
+except ImportError as e:
+    print(f'❌ motor: {e}')
+    exit(1)
+
+try:
+    from dotenv import load_dotenv
+    print('✅ python-dotenv')
+except ImportError as e:
+    print(f'❌ python-dotenv: {e}')
+    exit(1)
+
+try:
+    import magic
+    print('✅ python-magic')
+except ImportError as e:
+    print(f'❌ python-magic: {e}')
+    exit(1)
+
+print('\n🎉 All external dependencies working!')
+"
+
+  # Configuration validation
+  config-test:
+    runs-on: ubuntu-latest
+    name: Configuration Validation
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Test configuration without sensitive data
+      run: |
+        python -c "
+import os
+import sys
+
+# Mock environment variables for testing
+os.environ['TELEGRAM_BOT_TOKEN'] = 'test_token_123456789:abcdef'
+os.environ['MONGO_CONNECTION_STRING'] = 'mongodb://localhost:27017/test'
+os.environ['IMAP_HOST'] = 'test.example.com'
+os.environ['IMAP_PORT'] = '993'
+os.environ['IMAP_USERNAME'] = 'test@example.com'
+os.environ['IMAP_PASSWORD'] = 'test_password'
+
+try:
+    import config
+    print('✅ Configuration module loaded successfully')
+
+    # Test critical configuration values
+    required_vars = [
+        'TELEGRAM_BOT_TOKEN',
+        'MONGO_CONNECTION_STRING',
+        'IMAP_HOST',
+        'IMAP_USERNAME',
+        'IMAP_PASSWORD'
+    ]
+
+    for var in required_vars:
+        value = getattr(config, var, None)
+        if not value:
+            print(f'❌ Missing required configuration: {var}')
+            sys.exit(1)
+
+    print(f'✅ {len(required_vars)} required configuration variables present')
+
+except Exception as e:
+    print(f'❌ Configuration validation failed: {e}')
+    sys.exit(1)
+"
+
+    - name: Test environment file structure
+      run: |
+        if [ -f ".env.example" ]; then
+          echo "✅ .env.example file exists"
+
+          # Check for required environment variables in example
+          required_vars=(
+            "TELEGRAM_BOT_TOKEN"
+            "MONGO_CONNECTION_STRING"
+            "IMAP_HOST"
+            "IMAP_USERNAME"
+            "IMAP_PASSWORD"
+          )
+
+          missing_vars=()
+          for var in "${required_vars[@]}"; do
+            if ! grep -q "^$var=" .env.example; then
+              missing_vars+=("$var")
+            fi
+          done
+
+          if [ ${#missing_vars[@]} -eq 0 ]; then
+            echo "✅ All required environment variables present in .env.example"
+          else
+            echo "❌ Missing environment variables in .env.example:"
+            printf '  %s\n' "${missing_vars[@]}"
+            exit 1
+          fi
+        else
+          echo "❌ .env.example file not found"
+          exit 1
+        fi
+
+  # Security scan
+  security:
+    runs-on: ubuntu-latest
+    name: Security Scan
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Install security tools
+      run: |
+        python -m pip install --upgrade pip
+        pip install bandit safety
+
+    - name: Run Bandit security scan
+      run: |
+        bandit -r . -f json -o bandit-report.json || true
+        bandit -r . -f txt
+
+    - name: Check dependencies for known vulnerabilities
+      run: |
+        # Create requirements.txt without version constraints for safety check
+        python -c "
+with open('requirements.txt', 'r') as f:
+    lines = f.readlines()
+
+clean_requirements = []
+for line in lines:
+    line = line.strip()
+    if line and not line.startswith('#'):
+        # Extract package name before any version specifiers
+        package = line.split('>=')[0].split('==')[0].split('<=')[0].split('>')[0].split('<')[0].strip()
+        if package:
+            clean_requirements.append(package)
+
+print('\\n'.join(clean_requirements))
+" > clean_requirements.txt
+
+        safety check --json --output safety-report.json || true
+        safety check
+
+    - name: Scan for hardcoded secrets
+      run: |
+        python -c "
+import re
+import os
+
+# Patterns for common secrets
+secret_patterns = [
+    r'password\s*[=:]\s*[\"'\''][^\"'\'']+[\"'\'']',
+    r'token\s*[=:]\s*[\"'\''][^\"'\'']+[\"'\'']',
+    r'secret\s*[=:]\s*[\"'\''][^\"'\'']+[\"'\'']',
+    r'key\s*[=:]\s*[\"'\''][^\"'\'']+[\"'\'']',
+    r'api[_-]?key\s*[=:]\s*[\"'\''][^\"'\'']+[\"'\'']',
+]
+
+# Files to scan
+file_extensions = ['.py', '.md', '.txt', '.yml', '.yaml']
+exclude_files = ['.git', '__pycache__', '.pytest_cache', 'venv', 'node_modules']
+
+suspicious_lines = []
+
+for root, dirs, files in os.walk('.'):
+    # Skip excluded directories
+    dirs[:] = [d for d in dirs if d not in exclude_files]
+
+    for file in files:
+        if any(file.endswith(ext) for ext in file_extensions):
+            file_path = os.path.join(root, file)
+            try:
+                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    for line_num, line in enumerate(f, 1):
+                        # Skip comments and docstrings
+                        stripped = line.strip()
+                        if stripped.startswith('#') or stripped.startswith('\"\"\"') or stripped.startswith(\"'''\"):
+                            continue
+
+                        for pattern in secret_patterns:
+                            if re.search(pattern, line, re.IGNORECASE):
+                                # Skip obvious examples and templates
+                                if any(word in line.lower() for word in ['example', 'test', 'demo', 'your_', 'token_here', 'your_token']):
+                                    continue
+
+                                suspicious_lines.append(f'{file_path}:{line_num}: {line.strip()}')
+                                break
+            except Exception as e:
+                print(f'Error scanning {file_path}: {e}')
+
+if suspicious_lines:
+    print('⚠️ Potential hardcoded secrets found:')
+    for line in suspicious_lines[:10]:  # Limit output
+        print(f'  {line}')
+
+    if len(suspicious_lines) > 10:
+        print(f'  ... and {len(suspicious_lines) - 10} more')
+
+    exit(1)
+else:
+    print('✅ No obvious hardcoded secrets found')
+"
+
+    - name: Upload security reports
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: security-reports
+        path: |
+          bandit-report.json
+          safety-report.json

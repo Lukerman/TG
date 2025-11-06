@@ -15,9 +15,9 @@ from config import (
     SUCCESS_MESSAGES,
     MAX_INBOX_MESSAGES
 )
-from email.email_generator import EmailGenerator
-from email.imap_client import IMAPClient
-from email.email_parser import EmailParser
+from email_services.email_generator import EmailGenerator
+from email_services.imap_client import IMAPClient
+from email_services.email_parser import EmailParser
 from keyboards.inline_keyboards import InlineKeyboards
 from keyboards.reply_keyboards import ReplyKeyboards
 
